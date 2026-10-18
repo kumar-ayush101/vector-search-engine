@@ -114,6 +114,61 @@ func TestStoreSnapshotRestore(t *testing.T) {
 	}
 }
 
+func TestStoreMetadataDurability(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.vsnap")
+	s, err := New(testParams(4), path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Upsert items with string ids and metadata.
+	want := map[string]string{"doc-a": "red", "doc-b": "green", "doc-c": "blue"}
+	for id, color := range want {
+		if err := s.Default().Upsert(Item{
+			ID:       id,
+			Vector:   []float32{1, 2, 3, 4},
+			Metadata: map[string]string{"color": color},
+		}); err != nil {
+			t.Fatalf("Upsert %s: %v", id, err)
+		}
+	}
+	if err := s.Snapshot(); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	// Restore into a fresh store and verify ids + metadata survived.
+	s2, _ := New(testParams(4), path)
+	ok, err := s2.Restore()
+	if err != nil || !ok {
+		t.Fatalf("Restore = %v, %v; want true, nil", ok, err)
+	}
+	if s2.Default().Count() != 3 {
+		t.Fatalf("restored Count = %d, want 3", s2.Default().Count())
+	}
+	for id, color := range want {
+		got, err := s2.Default().Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s) after restore: %v", id, err)
+		}
+		if got.Metadata["color"] != color {
+			t.Fatalf("Get(%s) color = %q, want %q", id, got.Metadata["color"], color)
+		}
+	}
+	// A query must return the correct string ids and metadata, not synthetic ones.
+	hits, err := s2.Default().Query([]float32{1, 2, 3, 4}, 3)
+	if err != nil {
+		t.Fatalf("Query after restore: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("expected query hits after restore")
+	}
+	if _, ok := want[hits[0].ID]; !ok {
+		t.Fatalf("restored query returned unknown id %q", hits[0].ID)
+	}
+	if hits[0].Metadata["color"] == "" {
+		t.Fatalf("restored query hit missing metadata: %+v", hits[0])
+	}
+}
+
 func TestRestoreNoSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing.vsnap")
 	s, _ := New(testParams(4), path)

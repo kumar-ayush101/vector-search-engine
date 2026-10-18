@@ -53,7 +53,7 @@ func run() error {
 	if restored, err := st.Restore(); err != nil {
 		log.Warn("snapshot restore failed, starting empty", "error", err)
 	} else if restored {
-		log.Info("restored index from snapshot", "path", cfg.SnapshotPath(), "count", st.LiveVectors())
+		log.Info("restored index from snapshot", "path", cfg.SnapshotPath(), "count", st.Default().Count())
 	}
 
 	// Embedding provider: deterministic local embedder by default.
