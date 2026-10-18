@@ -69,7 +69,11 @@ type Index struct {
 	hasEntry   bool
 
 	rng *rand.Rand
+	seed int64
 }
+
+// seedField returns the RNG seed used to build this index.
+func (ix *Index) seedField() int64 { return ix.seed }
 
 // NewIndex builds an empty index, applying defaults for any zero parameter.
 func NewIndex(p Params) (*Index, error) {
@@ -98,6 +102,7 @@ func NewIndex(p Params) (*Index, error) {
 		levelMult: 1 / math.Log(float64(p.M)),
 		nodes:     make(map[uint32]*node),
 		rng:       rand.New(rand.NewSource(p.Seed)),
+		seed:      p.Seed,
 	}, nil
 }
 
