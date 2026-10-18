@@ -1,5 +1,11 @@
+# Multi-node cluster: 3 nodes form a sharded cluster via PEERS. Each node owns
+# one shard (NODE_INDEX) and reaches the others over HTTP. Query any node and
+# it scatter-gathers across all three. node0 serves the dashboard.
+#
+#   docker compose up --build
+#   open http://localhost:8080
 services:
-  vector-search:
+  node0:
     build: .
     image: vector-search-engine:latest
     ports:
@@ -8,13 +14,31 @@ services:
       APP_ENV: production
       DIM: "128"
       METRIC: cosine
-      HNSW_M: "16"
-      HNSW_EF_SEARCH: "64"
-      SNAPSHOT_EVERY: 30s
-      DATA_DIR: /app/data
-    volumes:
-      - index-data:/app/data
+      PEERS: "http://node0:8080,http://node1:8080,http://node2:8080"
+      NODE_INDEX: "0"
+      SERVE_FRONTEND: "true"
     restart: unless-stopped
 
-volumes:
-  index-data:
+  node1:
+    image: vector-search-engine:latest
+    environment:
+      APP_ENV: production
+      DIM: "128"
+      METRIC: cosine
+      PEERS: "http://node0:8080,http://node1:8080,http://node2:8080"
+      NODE_INDEX: "1"
+      SERVE_FRONTEND: "false"
+    depends_on: [node0]
+    restart: unless-stopped
+
+  node2:
+    image: vector-search-engine:latest
+    environment:
+      APP_ENV: production
+      DIM: "128"
+      METRIC: cosine
+      PEERS: "http://node0:8080,http://node1:8080,http://node2:8080"
+      NODE_INDEX: "2"
+      SERVE_FRONTEND: "false"
+    depends_on: [node0]
+    restart: unless-stopped

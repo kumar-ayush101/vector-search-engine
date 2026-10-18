@@ -7,3 +7,4 @@ bin/
 *.exe
 .vscode
 .idea
+client/node_modules
