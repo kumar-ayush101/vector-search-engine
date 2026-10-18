@@ -6,6 +6,10 @@
 ![Docker](https://img.shields.io/badge/Docker-multi--stage-2496ED?logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
+> **Live demo:** https://vector-search-engine.onrender.com
+> (single-node instance on a free tier — the first request after idle may take
+> a moment to wake, and demo data resets when the instance restarts)
+
 A **distributed** vector similarity search engine written from scratch in Go.
 The core index — an **HNSW** (Hierarchical Navigable Small World) graph — uses
 only the Go standard library: **no FAISS, hnswlib, Pinecone, or pgvector**. On
