@@ -33,6 +33,15 @@ func (s *Store) Default() *Collection {
 	return s.coll
 }
 
+// LiveVectors returns the number of vectors in the underlying index. After a
+// snapshot Restore this reflects the graph loaded from disk, which may exceed
+// Count() because the string-id/metadata map is not yet rebuilt (see Restore).
+func (s *Store) LiveVectors() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.coll.index.Len()
+}
+
 // Snapshot persists the current index to disk atomically.
 func (s *Store) Snapshot() error {
 	s.mu.RLock()
