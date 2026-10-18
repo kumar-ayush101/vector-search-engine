@@ -1,0 +1,20 @@
+services:
+  vector-search:
+    build: .
+    image: vector-search-engine:latest
+    ports:
+      - "8080:8080"
+    environment:
+      APP_ENV: production
+      DIM: "128"
+      METRIC: cosine
+      HNSW_M: "16"
+      HNSW_EF_SEARCH: "64"
+      SNAPSHOT_EVERY: 30s
+      DATA_DIR: /app/data
+    volumes:
+      - index-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  index-data:

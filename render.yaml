@@ -1,0 +1,22 @@
+# Render blueprint: one-click deploy of the vector search engine.
+# New + -> Blueprint -> select this repo. Render builds the Dockerfile and
+# exposes the service at https://<service>.onrender.com.
+services:
+  - type: web
+    name: vector-search-engine
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DIM
+        value: "128"
+      - key: METRIC
+        value: cosine
+      - key: SNAPSHOT_EVERY
+        value: 30s
+    disk:
+      name: index-data
+      mountPath: /app/data
+      sizeGB: 1

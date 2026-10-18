@@ -1,0 +1,9 @@
+.git
+.github
+*.md
+data/
+*.vsnap
+bin/
+*.exe
+.vscode
+.idea
