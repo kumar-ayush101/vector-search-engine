@@ -1,7 +1,8 @@
 // Command server is the entrypoint for the vector search engine. It wires
 // configuration, logging, the vector store, the embedding provider and the
-// HTTP API, restores any on-disk snapshot, runs periodic background snapshots,
-// and shuts down gracefully on SIGINT/SIGTERM.
+// HTTP API. In single-node mode it serves one local index; in cluster mode
+// (PEERS set) it builds a coordinator that shards across all peers and serves
+// its own partition's internal shard endpoints for the other nodes.
 package main
 
 import (
@@ -14,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kumar-ayush101/vector-search-engine/internal/cluster"
 	"github.com/kumar-ayush101/vector-search-engine/internal/config"
 	"github.com/kumar-ayush101/vector-search-engine/internal/embed"
 	"github.com/kumar-ayush101/vector-search-engine/internal/hnsw"
@@ -36,37 +38,57 @@ func run() error {
 	}
 	log := newLogger(cfg)
 	log.Info("starting vector search engine",
-		"env", cfg.Env, "port", cfg.HTTPPort, "dim", cfg.Dim, "metric", cfg.Metric.String())
+		"env", cfg.Env, "port", cfg.HTTPPort, "dim", cfg.Dim, "metric", cfg.Metric.String(),
+		"cluster", cfg.ClusterEnabled(), "serve_frontend", cfg.ServeFrontend)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Vector store.
 	params := hnsw.Params{
 		Dim: cfg.Dim, Metric: cfg.Metric, M: cfg.M,
 		EfConstruction: cfg.EfConstruction, EfSearch: cfg.EfSearch, Seed: cfg.Seed,
 	}
-	st, err := store.New(params, cfg.SnapshotPath())
-	if err != nil {
-		return err
-	}
-	if restored, err := st.Restore(); err != nil {
-		log.Warn("snapshot restore failed, starting empty", "error", err)
-	} else if restored {
-		log.Info("restored index from snapshot", "path", cfg.SnapshotPath(), "count", st.Default().Count())
-	}
-
-	// Embedding provider: deterministic local embedder by default.
 	embedder := embed.NewHashEmbedder(cfg.Dim)
-
-	// Metrics + handlers + router.
 	m := metrics.New()
-	m.IndexSize.Set(float64(st.Default().Count()))
-	handlers := httpapi.NewHandlers(st, embedder, m, log)
-	router := httpapi.NewRouter(httpapi.RouterConfig{Handlers: handlers, Metrics: m, Log: log})
 
-	// Background periodic snapshot.
-	if cfg.SnapshotEvery > 0 {
+	var (
+		engine     httpapi.Engine
+		mount      func(mux *http.ServeMux)
+		st         *store.Store // non-nil only in single-node mode (for snapshots)
+	)
+
+	if cfg.ClusterEnabled() {
+		engine, mount, err = buildCluster(cfg, params, log)
+		if err != nil {
+			return err
+		}
+		log.Info("cluster mode", "shards", len(cfg.Peers), "node_index", cfg.NodeIndex)
+	} else {
+		st, err = store.New(params, cfg.SnapshotPath())
+		if err != nil {
+			return err
+		}
+		if restored, rerr := st.Restore(); rerr != nil {
+			log.Warn("snapshot restore failed, starting empty", "error", rerr)
+		} else if restored {
+			log.Info("restored index from snapshot", "path", cfg.SnapshotPath(), "count", st.Default().Count())
+		}
+		engine = httpapi.NewStoreEngine(st)
+		m.IndexSize.Set(float64(st.Default().Count()))
+	}
+
+	handlers := httpapi.NewHandlers(engine, cfg.Dim, embedder, m, log)
+	router := httpapi.NewRouter(httpapi.RouterConfig{
+		Handlers:      handlers,
+		Metrics:       m,
+		Log:           log,
+		ServeFrontend: cfg.ServeFrontend,
+		FrontendDir:   cfg.FrontendDir,
+		Mount:         mount,
+	})
+
+	// Background periodic snapshots (single-node mode only).
+	if st != nil && cfg.SnapshotEvery > 0 {
 		go snapshotLoop(ctx, st, cfg.SnapshotEvery, log)
 	}
 
@@ -92,22 +114,59 @@ func run() error {
 		log.Info("shutdown signal received")
 	}
 
-	// Graceful shutdown: stop accepting requests, then persist a final snapshot.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("graceful shutdown failed", "error", err)
 	}
-	if err := st.Snapshot(); err != nil {
-		log.Error("final snapshot failed", "error", err)
-	} else {
-		log.Info("final snapshot written", "path", cfg.SnapshotPath())
+	if st != nil {
+		if err := st.Snapshot(); err != nil {
+			log.Error("final snapshot failed", "error", err)
+		} else {
+			log.Info("final snapshot written", "path", cfg.SnapshotPath())
+		}
 	}
 	log.Info("shutdown complete")
 	return nil
 }
 
-// snapshotLoop persists the index at a fixed interval until ctx is cancelled.
+// buildCluster constructs a coordinator that shards across all peers. This
+// node owns one local shard (at NodeIndex) and reaches the others as remote
+// shards over HTTP; it also returns a mount function that serves this node's
+// local shard to peers via the internal endpoints.
+func buildCluster(cfg *config.Config, params hnsw.Params, log *slog.Logger) (httpapi.Engine, func(mux *http.ServeMux), error) {
+	local, err := cluster.NewLocalShard("shard-local", params)
+	if err != nil {
+		return nil, nil, err
+	}
+	shards := make([]cluster.Shard, len(cfg.Peers))
+	for i, peer := range cfg.Peers {
+		if i == cfg.NodeIndex {
+			shards[i] = local
+		} else {
+			shards[i] = cluster.NewRemoteShard("shard-"+itoa(i), peer)
+		}
+	}
+	ring := cluster.NewRing(len(cfg.Peers), 128)
+	coord := cluster.NewCoordinator(ring, shards)
+	mount := func(mux *http.ServeMux) { cluster.RegisterInternal(mux, local) }
+	return coord, mount, nil
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}
+
 func snapshotLoop(ctx context.Context, st *store.Store, every time.Duration, log *slog.Logger) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()

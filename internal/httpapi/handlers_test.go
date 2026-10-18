@@ -26,7 +26,7 @@ func newTestServer(t *testing.T) http.Handler {
 	}
 	emb := embed.NewHashEmbedder(testDim)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := NewHandlers(s, emb, nil, log)
+	h := NewHandlers(NewStoreEngine(s), testDim, emb, nil, log)
 	return NewRouter(RouterConfig{Handlers: h, Log: log})
 }
 

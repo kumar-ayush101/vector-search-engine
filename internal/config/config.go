@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kumar-ayush101/vector-search-engine/internal/vmath"
@@ -25,6 +26,18 @@ type Config struct {
 	Seed          int64         // RNG seed
 	SnapshotEvery time.Duration // periodic snapshot interval (0 = disabled)
 	ShutdownGrace time.Duration // graceful shutdown timeout
+
+	// Clustering. PEERS is a comma-separated list of peer base URLs
+	// (e.g. "http://node0:8080,http://node1:8080"). When set, the node joins
+	// a cluster: the coordinator shards across all peers (one shard per peer).
+	// NodeIndex is this node's position in the PEERS list and selects which
+	// shard this node owns locally.
+	Peers     []string
+	NodeIndex int
+
+	// Frontend. ServeFrontend serves the React dashboard from FrontendDir.
+	ServeFrontend bool
+	FrontendDir   string
 }
 
 // Load reads configuration from the environment.
@@ -45,6 +58,10 @@ func Load() (*Config, error) {
 		Seed:           int64(getenvInt("HNSW_SEED", 42)),
 		SnapshotEvery:  getenvDuration("SNAPSHOT_EVERY", 30*time.Second),
 		ShutdownGrace:  getenvDuration("SHUTDOWN_GRACE", 10*time.Second),
+		Peers:          splitCSV(os.Getenv("PEERS")),
+		NodeIndex:      getenvInt("NODE_INDEX", 0),
+		ServeFrontend:  getenvBool("SERVE_FRONTEND", true),
+		FrontendDir:    getenv("FRONTEND_DIR", "./web"),
 	}
 	if cfg.Dim <= 0 {
 		return nil, fmt.Errorf("config: DIM must be > 0, got %d", cfg.Dim)
@@ -54,6 +71,10 @@ func Load() (*Config, error) {
 
 // IsProduction reports whether the app runs in production mode.
 func (c *Config) IsProduction() bool { return c.Env == "production" }
+
+// ClusterEnabled reports whether the node should run in multi-node cluster mode
+// (two or more peers configured).
+func (c *Config) ClusterEnabled() bool { return len(c.Peers) >= 2 }
 
 // SnapshotPath is the full path of the index snapshot file.
 func (c *Config) SnapshotPath() string {
@@ -92,4 +113,31 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func getenvBool(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		switch strings.ToLower(v) {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
+		}
+	}
+	return def
+}
+
+// splitCSV splits a comma-separated list, trimming spaces and dropping empties.
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }

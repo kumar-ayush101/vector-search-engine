@@ -13,15 +13,17 @@ import (
 
 // Handlers holds the dependencies for the HTTP handlers.
 type Handlers struct {
-	store    *store.Store
+	engine   Engine
+	dim      int
 	embedder embed.Provider
 	metrics  *metrics.Collectors
 	log      *slog.Logger
 }
 
-// NewHandlers constructs the handler set.
-func NewHandlers(s *store.Store, e embed.Provider, m *metrics.Collectors, log *slog.Logger) *Handlers {
-	return &Handlers{store: s, embedder: e, metrics: m, log: log}
+// NewHandlers constructs the handler set. dim is the vector dimensionality
+// used to validate requests and size embeddings.
+func NewHandlers(engine Engine, dim int, e embed.Provider, m *metrics.Collectors, log *slog.Logger) *Handlers {
+	return &Handlers{engine: engine, dim: dim, embedder: e, metrics: m, log: log}
 }
 
 // ---- Request/response bodies ----
@@ -69,13 +71,15 @@ func (h *Handlers) Upsert(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := h.store.Default().Upsert(store.Item{ID: req.ID, Vector: vec, Metadata: req.Metadata}); err != nil {
+	if err := h.engine.Upsert(r.Context(), store.Item{ID: req.ID, Vector: vec, Metadata: req.Metadata}); err != nil {
 		h.writeStoreError(w, err)
 		return
 	}
 	if h.metrics != nil {
 		h.metrics.UpsertsTotal.Inc()
-		h.metrics.IndexSize.Set(float64(h.store.Default().Count()))
+		if n, err := h.engine.Count(r.Context()); err == nil {
+			h.metrics.IndexSize.Set(float64(n))
+		}
 	}
 	writeJSON(w, http.StatusOK, store.Item{ID: req.ID, Metadata: req.Metadata})
 }
@@ -96,7 +100,7 @@ func (h *Handlers) Query(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	start := time.Now()
-	hits, err := h.store.Default().Query(vec, req.K)
+	hits, err := h.engine.Query(r.Context(), vec, req.K)
 	if err != nil {
 		h.writeStoreError(w, err)
 		return
@@ -111,7 +115,7 @@ func (h *Handlers) Query(w http.ResponseWriter, r *http.Request) {
 // Get returns an item's metadata by id.
 func (h *Handlers) Get(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	it, err := h.store.Default().Get(id)
+	it, err := h.engine.Get(r.Context(), id)
 	if err != nil {
 		h.writeStoreError(w, err)
 		return
@@ -122,21 +126,24 @@ func (h *Handlers) Get(w http.ResponseWriter, r *http.Request) {
 // Delete removes an item by id.
 func (h *Handlers) Delete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := h.store.Default().Delete(id); err != nil {
+	if err := h.engine.Delete(r.Context(), id); err != nil {
 		h.writeStoreError(w, err)
 		return
 	}
 	if h.metrics != nil {
-		h.metrics.IndexSize.Set(float64(h.store.Default().Count()))
+		if n, err := h.engine.Count(r.Context()); err == nil {
+			h.metrics.IndexSize.Set(float64(n))
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // Stats returns collection statistics.
-func (h *Handlers) Stats(w http.ResponseWriter, _ *http.Request) {
+func (h *Handlers) Stats(w http.ResponseWriter, r *http.Request) {
+	count, _ := h.engine.Count(r.Context())
 	writeJSON(w, http.StatusOK, statsResponse{
-		Count:    h.store.Default().Count(),
-		Dim:      h.store.Default().Dim(),
+		Count:    count,
+		Dim:      h.dim,
 		Embedder: h.embedder.Name(),
 	})
 }
@@ -146,11 +153,12 @@ func (h *Handlers) Health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// Ready is a readiness probe; the store is always ready once constructed.
-func (h *Handlers) Ready(w http.ResponseWriter, _ *http.Request) {
+// Ready is a readiness probe.
+func (h *Handlers) Ready(w http.ResponseWriter, r *http.Request) {
+	count, _ := h.engine.Count(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ready",
-		"count":  h.store.Default().Count(),
+		"count":  count,
 	})
 }
 
