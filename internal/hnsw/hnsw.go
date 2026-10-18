@@ -125,6 +125,17 @@ func (ix *Index) Dim() int { return ix.dim }
 // Metric returns the configured distance metric.
 func (ix *Index) Metric() vmath.Metric { return ix.metric }
 
+// SetEfSearch adjusts the query-time candidate list size. Larger values trade
+// latency for recall. Safe to call concurrently with reads.
+func (ix *Index) SetEfSearch(ef int) {
+	if ef <= 0 {
+		return
+	}
+	ix.mu.Lock()
+	ix.efSearch = ef
+	ix.mu.Unlock()
+}
+
 // randomLevel draws a level from an exponentially decaying distribution, the
 // mechanism that makes upper layers exponentially sparse.
 func (ix *Index) randomLevel() int {
