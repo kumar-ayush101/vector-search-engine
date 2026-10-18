@@ -2,40 +2,48 @@
 
 [![CI](https://github.com/kumar-ayush101/vector-search-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/kumar-ayush101/vector-search-engine/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)
+![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-multi--stage-2496ED?logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-A vector similarity search engine written from scratch in Go. The core index —
-an **HNSW** (Hierarchical Navigable Small World) graph — is built on the Go
-standard library only: **no FAISS, hnswlib, Pinecone, or pgvector**. It ships
-with on-disk persistence, a JSON REST API, server-side embeddings, Prometheus
-metrics, Docker packaging and a race-tested suite.
+A **distributed** vector similarity search engine written from scratch in Go.
+The core index — an **HNSW** (Hierarchical Navigable Small World) graph — uses
+only the Go standard library: **no FAISS, hnswlib, Pinecone, or pgvector**. On
+top of the index it adds crash-safe persistence, consistent-hash **sharding
+with scatter-gather queries across a multi-node cluster**, server-side
+embeddings, Prometheus metrics, a React dashboard served from the same binary,
+and a measured benchmark harness.
 
 Vector search is the engine behind semantic search and retrieval-augmented
 generation (RAG). Most projects reach for a managed service or a C++ library;
-this one implements the index, the storage format, and the serving layer by
-hand to show how approximate nearest-neighbour (ANN) search actually works end
-to end.
+this one implements the index, the storage format, the distribution layer and
+the serving layer by hand.
 
 ---
 
 ## Highlights
 
 - **HNSW from scratch** — layered proximity graph with greedy descent through
-  exponentially sparse upper layers, then an ef-bounded best-first search on
-  layer 0. Measured **recall@10 = 1.0** against brute force on a 2k×32-dim set.
-- **Three distance metrics** — cosine, Euclidean (L2) and dot product, unified
-  so the index always minimises distance.
-- **Crash-safe persistence** — a compact binary snapshot written via temp file
-  + `fsync` + atomic rename, so a crash mid-write never corrupts the index.
-- **Text or raw vectors** — upsert/query by a raw `vector` or by `text` that is
+  exponentially sparse upper layers, then an `ef`-bounded best-first search on
+  layer 0. Measured **recall@10 up to 0.97** against brute force (see below).
+- **Distributed scatter-gather** — vectors are partitioned across shards by a
+  **consistent-hash ring**; a coordinator fans each query out to all shards in
+  parallel and merges a global top-k with a bounded heap. Sharded results match
+  the single-node baseline with **0.999 top-k agreement**.
+- **Multi-node cluster** — shards can live in other processes, reached over
+  HTTP. The same binary runs standalone or as a cluster node (set `PEERS`).
+- **Crash-safe persistence** — a compact binary snapshot of the graph plus a
+  metadata sidecar, both written via temp file + `fsync` + atomic rename, so a
+  restart restores vectors **and** ids/metadata intact.
+- **Text or raw vectors** — upsert/query by a raw `vector` or by `text`
   embedded server-side through a pluggable `Provider`. A deterministic local
-  hash embedder is the default, so the service runs with **no API keys**.
-- **Production hygiene** — structured `slog` logging, request IDs, panic
-  recovery, CORS, Prometheus `/metrics`, `/health` and `/ready` probes,
-  graceful shutdown with a final snapshot, periodic background snapshots.
-- **Single static binary** in a non-root Alpine container; CI runs `vet`,
-  build, `test -race` and a Docker build on every push.
+  embedder is the default, so the service runs with **no API keys**.
+- **React dashboard** served from the Go binary (single origin): index
+  documents, run semantic search, watch live stats.
+- **Production hygiene** — structured `slog` logs, request IDs, panic recovery,
+  CORS, Prometheus `/metrics`, `/health` + `/ready`, graceful shutdown with a
+  final snapshot, periodic background snapshots. CI runs vet, build,
+  `test -race`, a frontend build, and a Docker build.
 
 ---
 
@@ -43,76 +51,92 @@ to end.
 
 ```
                      ┌─────────────────────────────────────┐
-   Client ─────────▶ │  HTTP layer (net/http stdlib)        │
+   Browser / API ──▶ │  HTTP layer (net/http stdlib)        │
                      │  reqID · logging · metrics · recover │
+                     │  + React dashboard (single origin)   │
                      └──────────────────┬──────────────────┘
-                                        │
-                                        ▼
-                     ┌─────────────────────────────────────┐
-                     │  store (collection service layer)    │
-                     │  string id ⇄ uint32 · metadata       │
-                     │  snapshot / restore                  │
-                     └──────────────────┬──────────────────┘
-                                        │
-                      ┌─────────────────┼──────────────────┐
-                      ▼                 ▼                   ▼
-               hnsw (ANN index)   vmath (metrics)    embed (Provider)
-               layered graph      cosine/L2/dot      hash-local default
-               Add/Search/Delete                     (pluggable)
-                      │
-                      ▼
-               binary snapshot on disk (fsync + atomic rename)
+                                        │  Engine interface
+                        ┌───────────────┴───────────────┐
+                        ▼                                ▼
+                single-node store              cluster Coordinator
+                (one HNSW index)               consistent-hash ring
+                        │                        │  scatter / gather
+                        │                 ┌──────┼───────┐
+                        ▼                 ▼      ▼       ▼
+                  hnsw + vmath         shard0  shard1  shard2
+                  snapshot + meta      (local) (remote over HTTP)
 ```
 
 ### Project layout
 
 ```text
 .
-├── cmd/server/            # Entrypoint: wiring + graceful shutdown
+├── cmd/
+│   ├── server/            # Entrypoint: single-node or cluster
+│   └── vsbench/           # Benchmark harness (recall / latency / QPS)
 ├── internal/
 │   ├── vmath/             # Distance metrics (cosine, L2, dot)
 │   ├── hnsw/              # HNSW index + binary snapshot persistence
-│   ├── store/             # Collection service: string ids, metadata
+│   ├── store/             # Collection: string ids, metadata, durable snapshot
+│   ├── cluster/           # Ring, shards, coordinator, remote shard over HTTP
 │   ├── embed/             # Embedding Provider + local hash embedder
 │   ├── config/            # Env-driven configuration
 │   ├── metrics/           # Prometheus collectors
-│   └── httpapi/           # Router, handlers, middleware
-├── Dockerfile             # Multi-stage: build → tiny non-root runtime
-├── docker-compose.yml
-├── render.yaml            # One-click Render blueprint
-└── .github/workflows/     # CI
+│   └── httpapi/           # Router, handlers, middleware, Engine interface
+├── client/                # React (Vite) dashboard → builds to ./web
+├── Dockerfile             # 3-stage: frontend → Go → tiny runtime
+├── docker-compose.yml     # Local 3-node cluster
+└── render.yaml            # One-click Render blueprint
 ```
+
+---
+
+## Benchmarks
+
+`go run ./cmd/vsbench -n 5000 -dim 128 -k 10 -queries 500` sweeps `efSearch`
+and measures recall@k against a brute-force ground truth, plus latency and
+throughput. Representative run (Go 1.25, single machine — numbers are relative
+and depend on CPU):
+
+| efSearch | recall@10 | p99 latency | QPS |
+|---|---|---|---|
+| 10  | 0.44 | ~1.1 ms | ~10100 |
+| 20  | 0.60 | ~1.5 ms | ~5300  |
+| 40  | 0.77 | ~1.8 ms | ~3200  |
+| 64  | 0.86 | ~1.7 ms | ~2500  |
+| 100 | 0.93 | ~2.6 ms | ~1700  |
+| 200 | 0.97 | ~3.7 ms | ~1100  |
+
+This is the fundamental ANN tradeoff: a larger `efSearch` widens the search
+frontier, raising recall at the cost of latency and throughput.
 
 ---
 
 ## How HNSW works here
 
 HNSW stacks several proximity graphs. Layer 0 holds every point; each higher
-layer keeps an exponentially thinning random subset (level drawn from
-`floor(-ln(U) / ln M)`). A search starts at the single entry point on the top
-layer and **greedily hops toward the query**, descends a layer, and repeats.
-The upper layers behave like an express highway that reaches the query's
-neighbourhood in `O(log n)` hops; the dense bottom layer then refines the
-result with a best-first search bounded by `efSearch`.
+layer keeps an exponentially thinning random subset. A search starts at the
+entry point on the top layer, **greedily hops toward the query**, descends a
+layer, and repeats; the upper layers reach the query's neighbourhood in
+`O(log n)` hops and the dense bottom layer refines the result with a best-first
+search bounded by `efSearch`. Insert links each node to its `M` nearest
+neighbours per layer (`2M` on layer 0), pruning over-full neighbours back to
+budget. See `internal/hnsw/hnsw.go`.
 
-- **Insert** finds an entry point via greedy descent, then on each layer at or
-  below the node's level runs an `efConstruction` search and links the node to
-  its `M` nearest neighbours (`2M` on layer 0), pruning over-full neighbours
-  back to budget by keeping the closest links.
-- **Search** mirrors insert's descent, then returns the `k` nearest from a
-  bounded candidate set, skipping deleted nodes.
-- **Delete** is a soft tombstone filtered from results; replacing an id fully
-  rewires the graph.
+## How sharding works here
 
-See `internal/hnsw/hnsw.go` for the commented implementation and
-`internal/hnsw/hnsw_test.go` for the brute-force recall test.
+A consistent-hash ring (`internal/cluster/ring.go`) maps each vector id to an
+owning shard using virtual nodes, so adding or removing a shard only remaps
+keys near the change. Writes route to the owning shard; **queries scatter to
+every shard in parallel and the coordinator gathers the global top-k** with a
+max-heap of size k (`internal/cluster/coordinator.go`). Shards implement a
+single `Shard` interface, so an in-process `LocalShard` and an HTTP-backed
+`RemoteShard` are interchangeable — the same code path serves one process or a
+cluster.
 
 ---
 
 ## API reference
-
-All responses are JSON. A request supplies **either** a raw `vector` **or**
-`text` to be embedded server-side.
 
 | Method | Path | Description |
 | ------ | ---- | ----------- |
@@ -121,38 +145,22 @@ All responses are JSON. A request supplies **either** a raw `vector` **or**
 | `DELETE` | `/api/vectors/{id}` | Delete an item |
 | `POST` | `/api/query` | k-NN query `{ vector?/text?, k }` → ranked hits |
 | `GET` | `/api/stats` | Count, dimensionality, embedder name |
-| `GET` | `/health` | Liveness probe |
-| `GET` | `/ready` | Readiness probe |
+| `GET` | `/health` · `/ready` | Probes |
 | `GET` | `/metrics` | Prometheus metrics |
 
-### Example
-
 ```bash
-# Index a few documents by text (embedded server-side)
 curl -X POST http://localhost:8080/api/vectors \
   -H 'Content-Type: application/json' \
-  -d '{"id":"d1","text":"deep learning and neural networks","metadata":{"topic":"ml"}}'
+  -d '{"id":"d1","text":"deep learning and neural networks"}'
 
-curl -X POST http://localhost:8080/api/vectors \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"d2","text":"cooking pasta with tomato sauce"}'
-
-# Query by text; nearest first
 curl -X POST http://localhost:8080/api/query \
   -H 'Content-Type: application/json' \
   -d '{"text":"neural network training","k":5}'
-
-# Or query by a raw vector
-curl -X POST http://localhost:8080/api/query \
-  -H 'Content-Type: application/json' \
-  -d '{"vector":[0.12, 0.03, ...],"k":5}'
 ```
 
 ---
 
 ## Configuration
-
-All configuration is environment-driven.
 
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
@@ -163,22 +171,35 @@ All configuration is environment-driven.
 | `HNSW_M` | `16` | Max neighbours per node (upper layers) |
 | `HNSW_EF_CONSTRUCTION` | `200` | Candidate list size while building |
 | `HNSW_EF_SEARCH` | `64` | Candidate list size while querying |
-| `HNSW_SEED` | `42` | RNG seed for reproducible level assignment |
 | `DATA_DIR` | `./data` | Directory for index snapshots |
 | `SNAPSHOT_EVERY` | `30s` | Periodic snapshot interval (`0` disables) |
-| `SHUTDOWN_GRACE` | `10s` | Graceful shutdown timeout |
+| `PEERS` | — | CSV of peer URLs; two or more enables cluster mode |
+| `NODE_INDEX` | `0` | This node's position in `PEERS` |
+| `SERVE_FRONTEND` | `true` | Serve the React dashboard |
+| `FRONTEND_DIR` | `./web` | Static assets directory |
 
 ---
 
 ## Getting started
 
-```bash
-# Run locally
-DIM=128 go run ./cmd/server
-# open http://localhost:8080/health
+### Single node (API + dashboard)
 
-# Or with Docker
-docker compose up --build
+```bash
+cd client && npm install && npm run build && cd ..   # build the dashboard
+DIM=128 go run ./cmd/server                          # http://localhost:8080
+```
+
+### Multi-node cluster via Docker Compose
+
+```bash
+docker compose up --build          # 3 nodes form a sharded cluster
+# open http://localhost:8080 — query any node, it scatter-gathers across all
+```
+
+### Frontend dev server
+
+```bash
+cd client && npm run dev           # http://localhost:5173, proxies to :8080
 ```
 
 ---
@@ -186,45 +207,44 @@ docker compose up --build
 ## Testing
 
 ```bash
-go test -race ./...     # unit + handler tests, race detector
-go test -run TestRecall -v ./internal/hnsw   # recall vs brute force
+go test -race ./...                               # unit + handler + cluster
+go run ./cmd/vsbench                               # benchmark table
+go test -run TestScatterGather -v ./internal/cluster   # sharding correctness
 ```
 
-The suite covers distance maths, HNSW insert/search/delete, **recall against a
-brute-force baseline**, snapshot round-trips, the store layer, embeddings, and
-the full HTTP stack (including semantic ranking of text queries).
+The suite covers distance maths, HNSW insert/search/delete, **recall vs
+brute-force**, snapshot round-trips, **metadata durability across restart**,
+the store layer, embeddings, the full HTTP stack, consistent-hash distribution,
+**scatter-gather vs single-node agreement**, and a **real multi-node cluster
+over HTTP**.
 
 ---
 
 ## Roadmap
 
-The single-node engine above is complete. Distribution is staged next, reusing
-patterns from building a storage engine and a distributed scheduler:
-
 | Stage | Component | State |
 |---|---|---|
 | W1 | Distance metrics (cosine, L2, dot) | **Done** |
 | W2 | HNSW index: insert, k-NN search, delete | **Done** |
-| W3 | Crash-safe binary snapshot persistence | **Done** |
+| W3 | Crash-safe snapshot persistence (graph + metadata) | **Done** |
 | W4 | Collection service: string ids, metadata | **Done** |
 | W5 | REST API, middleware, health/ready, metrics | **Done** |
 | W6 | Server-side embeddings (pluggable provider) | **Done** |
-| W7 | Docker, CI, graceful shutdown, periodic snapshots | **Done** |
-| P2 | Full metadata durability in the snapshot format | Planned |
-| P2 | Sharding: partition vectors across nodes, scatter-gather queries | Planned |
-| P2 | Replication of shards for fault tolerance | Planned |
+| W7 | Benchmark harness with measured recall/latency/QPS | **Done** |
+| W8 | Consistent-hash sharding + scatter-gather queries | **Done** |
+| W9 | Multi-node cluster (remote shards over HTTP) | **Done** |
+| W10 | React dashboard served from the Go binary | **Done** |
+| W11 | Docker (multi-stage), compose cluster, CI, Render | **Done** |
+| P2 | Shard replication for fault tolerance | Planned |
 | P3 | Real embedding providers (OpenAI/Cohere/local ONNX) | Planned |
 | P3 | Product quantization for memory-efficient vectors | Stretch |
 
-> Status is honest: everything marked **Done** has tests you can run. The
-> metadata map is currently rebuilt rather than persisted on restore (the
-> vector graph itself is fully durable); closing that gap is the first P2 item.
-
----
+> Everything marked **Done** has tests you can run.
 
 ## Tech stack
 
-Go 1.25 · net/http (stdlib routing) · Prometheus · Docker · GitHub Actions
+Go 1.25 · net/http (stdlib routing) · React 18 + Vite · Prometheus · Docker ·
+GitHub Actions
 
 ## License
 
