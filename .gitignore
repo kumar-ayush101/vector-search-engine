@@ -1,0 +1,19 @@
+# Binaries
+/bin/
+*.exe
+*.out
+
+# Data / index snapshots
+/data/
+*.vsnap
+
+# Go
+/vendor/
+*.test
+coverage.out
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
